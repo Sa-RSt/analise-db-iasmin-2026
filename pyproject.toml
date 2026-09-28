@@ -1,0 +1,17 @@
+[project]
+name = "analise-db-iasmin-2026"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Sa-RSt", email = "sasha.rodelasteidle@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+analise-db-iasmin-2026 = "analise_db_iasmin_2026:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"

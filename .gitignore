@@ -1,0 +1,6 @@
+*.csv
+*.CSV
+*.xlsx
+*~lock*
+.venv
+tmp
