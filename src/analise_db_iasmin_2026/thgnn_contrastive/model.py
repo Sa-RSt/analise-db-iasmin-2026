@@ -1,72 +1,32 @@
+from typing import Protocol
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 
-class FiLMMLP(nn.Module):
-    """
-    Global mapping function f with bottleneck structure.
-    We'll implement it such that weights can be modulated externally.
-    """
-
-    def __init__(self, input_dim, hidden_dim):
-        super(FiLMMLP, self).__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-
-        # We'll define the parameters but we'll use them manually in forward if needed,
-        # or just use standard layers and modulate their parameters.
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, input_dim)
-
-    def forward(self, x, weights=None):
-        if weights is None:
-            x = F.leaky_relu(self.fc1(x))
-            x = self.fc2(x)
-            return x
-
-        # weights is a dict or a flat vector containing modulated parameters
-        # For simplicity in this implementation, we'll apply alpha/beta to activations
-        # instead of weights, which is mathematically equivalent if we only have linear layers.
-        # However, the paper says "on the global parameters".
-        # Let's try to be precise if possible, but activation FiLM is much more efficient.
-        # Re-reading: "scaling and shifting on the global parameters theta_f"
-        # Okay, let's implement weight modulation.
-
-        w1, b1, w2, b2 = weights
-
-        # x shape: (..., input_dim)
-        x = F.linear(x, w1, b1)
-        x = F.leaky_relu(x)
-        x = F.linear(x, w2, b2)
-        return x
+class ContrastiveModel(Protocol):
+    def forward_contrastive(self, x, type_idx): ...
+    def forward_headless(self, x, type_idx, edge_mask=None, feature_mask=None): ...
 
 
 class THGNN(nn.Module):
-    def __init__(self, n_sensors, n_types, window_size, d=16, d_hidden=4, n_type_emb=8, cnn_kernel_size=0):
-        super(THGNN, self).__init__()
+    def __init__(self, n_sensors, n_types, window_size, d=16, d_hidden=4, n_type_emb=8):
+        super().__init__()
         self.n_sensors = n_sensors
         self.window_size = window_size
         self.d = d
         self.d_hidden = d_hidden
-        self.cnn_kernel_size = cnn_kernel_size
 
         # 1. Shared GRU for temporal representation
         self.gru = nn.GRU(1, d, batch_first=True)
 
-        if self.cnn_kernel_size > 0:
-            self.cnn = nn.Conv1d(
-                in_channels=n_sensors,
-                out_channels=n_sensors,
-                kernel_size=self.cnn_kernel_size,
-                groups=n_sensors,
-            )
-
         # 2. Type Embedding
         self.type_emb = nn.Embedding(n_types, n_type_emb)
 
-        # 3. Global Mapping Function f
-        self.f = FiLMMLP(d, d_hidden)
+        # 3. Global Mapping Function f (bottleneck MLP)
+        self.f_fc1 = nn.Linear(d, d_hidden)
+        self.f_fc2 = nn.Linear(d_hidden, d)
 
         # 4. Hypernetwork tau (combined alpha and beta)
         self.df = (d_hidden * d) + d_hidden + (d * d_hidden) + d
@@ -84,10 +44,7 @@ class THGNN(nn.Module):
         self.out_fc = nn.Linear(d, 1)
 
         # 8. Contrastive Projector
-        self.projector = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
-
-        # 9. JEPA Predictor
-        self.predictor = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
+        self.projector = nn.Sequential(nn.Linear(d, d), nn.LeakyReLU(), nn.Linear(d, d))
 
     def get_modulated_params(self, h_it, type_idx):
         # h_it: (B, N, L, d)
@@ -100,12 +57,14 @@ class THGNN(nn.Module):
 
         tau_out = self.tau(tau_in)  # (B, N, L, 2*df)
         alpha, beta = tau_out.chunk(2, dim=-1)
+        alpha = F.leaky_relu(alpha)
+        beta = F.leaky_relu(beta)
 
         # Global parameters
-        w1_g = self.f.fc1.weight
-        b1_g = self.f.fc1.bias
-        w2_g = self.f.fc2.weight
-        b2_g = self.f.fc2.bias
+        w1_g = self.f_fc1.weight
+        b1_g = self.f_fc1.bias
+        w2_g = self.f_fc2.weight
+        b2_g = self.f_fc2.bias
         theta_f = torch.cat([w1_g.view(-1), b1_g, w2_g.view(-1), b2_g])  # (df,)
 
         # Modulate: (alpha + 1) * theta_f + beta
@@ -123,13 +82,7 @@ class THGNN(nn.Module):
             x = x * feature_mask
 
         # 1. GRU Encoding
-        if self.cnn_kernel_size > 0:
-            x_cnn = x.transpose(1, 2)  # (B, N, L)
-            x_cnn = self.cnn(x_cnn)    # (B, N, L_new)
-            L = L - self.cnn_kernel_size + 1
-            x_reshaped = x_cnn.reshape(B * N, L, 1)
-        else:
-            x_reshaped = x.transpose(1, 2).reshape(B * N, L, 1)  # (B*N, L, 1)
+        x_reshaped = x.transpose(1, 2).reshape(B * N, L, 1)  # (B*N, L, 1)
 
         h, _ = self.gru(x_reshaped)  # (B*N, L, d)
         h = h.view(B, N, L, self.d)  # (B, N, L, d)
@@ -176,8 +129,9 @@ class THGNN(nn.Module):
         h_nei = (m * weights.view(1, L, 1, 1)).sum(dim=1)  # (B, N, d)
         h_self = self.w_self(h[:, :, -1, :])  # (B, N, d)
 
-        h_all = F.leaky_relu(F.leaky_relu(h_nei + h_self))
+        h_all = F.leaky_relu(h_nei + h_self)
         h_all = self.w_all(h_all)  # (B, N, d)
+        h_all = F.leaky_relu(h_all)
 
         # 5. Output Prediction
         h_pool = h_all.mean(dim=1)  # (B, d)
@@ -189,7 +143,7 @@ class THGNN(nn.Module):
 
     def forward_head(self, h_pool):
         out = self.out_fc(h_pool)  # (B, 1)
-        return out.squeeze(-1)
+        return F.leaky_relu(out).squeeze(-1)
 
     def forward_contrastive(self, x, type_idx):
         h_pool = self.forward_headless(x, type_idx)
@@ -208,10 +162,9 @@ class BaselineGRU(nn.Module):
         n_types=None,
         d_hidden=None,
         n_type_emb=None,
-        cnn_kernel_size=0,
         **kwargs,
     ):
-        super(BaselineGRU, self).__init__()
+        super().__init__()
         self.n_sensors = n_sensors
         self.window_size = window_size
         self.d = d
@@ -223,7 +176,7 @@ class BaselineGRU(nn.Module):
             input_size=n_sensors,
             hidden_size=gru_hidden_dim,
             num_layers=gru_layers,
-            batch_first=True
+            batch_first=True,
         )
 
         # Linear projection to matching representation dimension 'd'
@@ -233,10 +186,7 @@ class BaselineGRU(nn.Module):
         self.out_fc = nn.Linear(d, 1)
 
         # Contrastive projector
-        self.projector = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
-
-        # JEPA Predictor
-        self.predictor = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
+        self.projector = nn.Sequential(nn.Linear(d, d), nn.LeakyReLU(), nn.Linear(d, d))
 
     def forward_headless(self, x, type_idx=None, edge_mask=None, feature_mask=None):
         # x shape: (B, L, N)
@@ -277,10 +227,9 @@ class BaselineLSTM(nn.Module):
         n_types=None,
         d_hidden=None,
         n_type_emb=None,
-        cnn_kernel_size=0,
         **kwargs,
     ):
-        super(BaselineLSTM, self).__init__()
+        super().__init__()
         self.n_sensors = n_sensors
         self.window_size = window_size
         self.d = d
@@ -292,7 +241,7 @@ class BaselineLSTM(nn.Module):
             input_size=n_sensors,
             hidden_size=lstm_hidden_dim,
             num_layers=lstm_layers,
-            batch_first=True
+            batch_first=True,
         )
 
         # Linear projection to matching representation dimension 'd'
@@ -302,10 +251,7 @@ class BaselineLSTM(nn.Module):
         self.out_fc = nn.Linear(d, 1)
 
         # Contrastive projector
-        self.projector = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
-
-        # JEPA Predictor
-        self.predictor = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
+        self.projector = nn.Sequential(nn.Linear(d, d), nn.LeakyReLU(), nn.Linear(d, d))
 
     def forward_headless(self, x, type_idx=None, edge_mask=None, feature_mask=None):
         # x shape: (B, L, N)
@@ -349,7 +295,7 @@ class Baseline1DCNN(nn.Module):
         n_type_emb=None,
         **kwargs,
     ):
-        super(Baseline1DCNN, self).__init__()
+        super().__init__()
         self.n_sensors = n_sensors
         self.window_size = window_size
         self.d = d
@@ -369,7 +315,7 @@ class Baseline1DCNN(nn.Module):
                     padding=padding,
                 )
             )
-            layers_list.append(nn.ReLU())
+            layers_list.append(nn.LeakyReLU())
             in_ch = cnn_channels
 
         self.net = nn.Sequential(*layers_list)
@@ -382,10 +328,7 @@ class Baseline1DCNN(nn.Module):
         self.out_fc = nn.Linear(d, 1)
 
         # Contrastive projector
-        self.projector = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
-
-        # JEPA Predictor
-        self.predictor = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
+        self.projector = nn.Sequential(nn.Linear(d, d), nn.LeakyReLU(), nn.Linear(d, d))
 
     def forward_headless(self, x, type_idx=None, edge_mask=None, feature_mask=None):
         # x shape: (B, L, N)
@@ -394,9 +337,9 @@ class Baseline1DCNN(nn.Module):
 
         # Conv1d expects input of shape (B, in_channels, L)
         x = x.transpose(1, 2)  # (B, N, L)
-        out = self.net(x)      # (B, cnn_channels, L_new)
-        out = self.pool(out)   # (B, cnn_channels, 1)
-        h_last = out.squeeze(-1) # (B, cnn_channels)
+        out = self.net(x)  # (B, cnn_channels, L_new)
+        out = self.pool(out)  # (B, cnn_channels, 1)
+        h_last = out.squeeze(-1)  # (B, cnn_channels)
 
         # Project to 'd' space
         h_pool = self.project_rep(h_last)  # (B, d)
@@ -423,12 +366,12 @@ def build_model(
     d=16,
     d_hidden=4,
     n_type_emb=8,
-    cnn_kernel_size=0,
     gru_hidden_dim=64,
     gru_layers=1,
     lstm_hidden_dim=64,
     lstm_layers=1,
     cnn_layers=2,
+    cnn_kernel_size=3,
     **kwargs,
 ):
     if model_type == "gru":
@@ -441,7 +384,6 @@ def build_model(
             n_types=n_types,
             d_hidden=d_hidden,
             n_type_emb=n_type_emb,
-            cnn_kernel_size=cnn_kernel_size,
             **kwargs,
         )
     elif model_type == "lstm":
@@ -454,20 +396,18 @@ def build_model(
             n_types=n_types,
             d_hidden=d_hidden,
             n_type_emb=n_type_emb,
-            cnn_kernel_size=cnn_kernel_size,
             **kwargs,
         )
     elif model_type in ["cnn1d", "1dcnn", "cnn"]:
-        k_size = cnn_kernel_size if cnn_kernel_size > 0 else 3
         return Baseline1DCNN(
             n_sensors=n_sensors,
             window_size=window_size,
             d=d,
             cnn_layers=cnn_layers,
-            cnn_kernel_size=k_size,
             n_types=n_types,
             d_hidden=d_hidden,
             n_type_emb=n_type_emb,
+            cnn_kernel_size=3,
             **kwargs,
         )
     else:
@@ -478,6 +418,4 @@ def build_model(
             d=d,
             d_hidden=d_hidden,
             n_type_emb=n_type_emb,
-            cnn_kernel_size=cnn_kernel_size,
         )
-

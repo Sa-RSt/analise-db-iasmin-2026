@@ -3,11 +3,16 @@ name = "analise-db-iasmin-2026"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-authors = [
-    { name = "Sa-RSt", email = "sasha.rodelasteidle@gmail.com" }
-]
+authors = [{ name = "Sa-RSt", email = "sasha.rodelasteidle@gmail.com" }]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "pandas>=3.0.6",
+    "rungrid",
+    "scikit-learn>=1.9.1",
+    "scikit-survival>=0.28.0",
+    "torch",
+    "torchvision",
+]
 
 [project.scripts]
 analise-db-iasmin-2026 = "analise_db_iasmin_2026:main"
@@ -15,3 +20,13 @@ analise-db-iasmin-2026 = "analise_db_iasmin_2026:main"
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cuda" }]
+torchvision = [{ index = "pytorch-cuda" }]
+rungrid = { path = "../rungrid", editable = true }
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true

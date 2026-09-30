@@ -1,7 +1,10 @@
+import os
+
 import numpy as np
 import pandas as pd
-import os
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+from analise_db_iasmin_2026.thgnn_contrastive.split import get_engine_split
 
 # All 21 sensors
 ALL_SENSORS = list(range(1, 22))
@@ -186,7 +189,6 @@ def get_preprocessed_data(
     """
     Full preprocessing pipeline with engine-level splitting and K-fold/LOEO support.
     """
-    from split import get_engine_split
 
     if loaded_data is not None:
         train_df_all, test_df, rul_df = loaded_data

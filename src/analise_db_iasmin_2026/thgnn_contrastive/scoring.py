@@ -1,8 +1,8 @@
 import numpy as np
-from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.metrics import mean_absolute_error, r2_score
 from sksurv.metrics import (
-    cumulative_dynamic_auc,
     concordance_index_censored,
+    cumulative_dynamic_auc,
     integrated_brier_score,
 )
 

@@ -4,3 +4,8 @@
 *~lock*
 .venv
 tmp
+.rg-*
+CMAPSSData
+__pycache__
+*.log
+temporal_and_heterogenous.*
