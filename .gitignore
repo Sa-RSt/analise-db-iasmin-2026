@@ -9,3 +9,6 @@ CMAPSSData
 __pycache__
 *.log
 temporal_and_heterogenous.*
+.env
+payload.zip
+

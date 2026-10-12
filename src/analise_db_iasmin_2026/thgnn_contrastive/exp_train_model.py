@@ -1,33 +1,43 @@
+import json
 import logging
+import shutil
+import subprocess
+import sys
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
-import sys
 from typing import Annotated, Literal, NoReturn
 
 import numpy as np
 import torch
-from rungrid.cli import CLI
 from rungrid.experiment import (
     STATE_ARG_RECORD,
     Experiment,
     Sampler,
     Trial,
     VarNamespace,
+    fixture,
     step_method,
 )
-from rungrid.version import version_from_git_commit_hash
+from rungrid.version import version_from_git_commit_hash, version_from_most_recent_mtime
 from sklearn.tree import DecisionTreeRegressor
 from torch.amp import GradScaler, autocast
 from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader, TensorDataset
 
+from analise_db_iasmin_2026.environment import Environment
+from analise_db_iasmin_2026.options import get_options
 from analise_db_iasmin_2026.thgnn_contrastive.model import (
     THGNN,
     Baseline1DCNN,
     BaselineGRU,
     BaselineLSTM,
     build_model,
+)
+from analise_db_iasmin_2026.thgnn_contrastive.n_cmapss import (
+    COLUMNS_TYPES,
+    FoldLoader,
+    get_n_cmapss_folds,
 )
 from analise_db_iasmin_2026.thgnn_contrastive.preprocess import (
     ACTIVE_SENSOR_TYPES,
@@ -37,8 +47,10 @@ from analise_db_iasmin_2026.thgnn_contrastive.scoring import (
     calculate_score,
 )
 
-TYPE_IDX_LIST = ACTIVE_SENSOR_TYPES
-N_TYPES = len(set(ACTIVE_SENSOR_TYPES))
+TYPE_IDX_LIST_CMAPSS = ACTIVE_SENSOR_TYPES
+N_TYPES_CMAPSS = len(set(ACTIVE_SENSOR_TYPES))
+TYPE_IDX_LIST_NEW_CMAPSS = [x[1] for x in COLUMNS_TYPES]
+N_TYPES_NEW_CMAPSS = len(set(TYPE_IDX_LIST_NEW_CMAPSS))
 
 type ModelType = THGNN | Baseline1DCNN | BaselineGRU | BaselineLSTM
 
@@ -156,7 +168,10 @@ def supcon_loss(
 
 
 class TrainModelExperiment(Experiment):
-    @lru_cache
+    def __hash__(self) -> int:
+        return 0
+
+    @fixture()
     def logger(self) -> logging.Logger:
         log = logging.getLogger(__name__)
         sh = logging.StreamHandler(sys.stderr)
@@ -171,18 +186,26 @@ class TrainModelExperiment(Experiment):
         return log
 
     def variables(self, v: VarNamespace, s: Sampler) -> None:
-        opts = CLI.get_instance().get_options()
+        opts = get_options()
         arch = opts["arch"].lower()
         assert arch in ["thgnn", "gru", "lstm", "cnn"]
 
+        mode = opts["mode"].lower()
+        assert mode in ["e2e", "supcon"]
+
         v.arch = arch
+        v.mode = mode
         v.dim = s.power_of_two(3, 5)
-        v.lr = s.log_uniform(5e-4, 5e-1)
-        v.batch_size = 128
+        v.lr = s.log_uniform(1e-5, 1e-1)
+        v.batch_size = 50 if mode == "e2e" else 128
         v.patience = 10
-        v.epochs = 50
+        v.epochs = int(opts.get("epochs", "") or 50)
         v.aug_jitter = 0.02
         v.aug_scaling = 0.1
+        if opts["train_on"] == "olden":
+            v.ds_name = s.random(["FD001", "FD002", "FD003", "FD004"])
+        else:
+            v.ds_name = opts["train_on"]
 
         with s.branch(arch):
             match arch:
@@ -207,57 +230,91 @@ class TrainModelExperiment(Experiment):
                     v.n_type_emb = 0
                     v.hdim = 0
 
-        v.margin_mode = s.categorical(["margin_absolute", "margin_relative"])
-        with s.branch(v.margin_mode):  # type: ignore
-            match v.margin_mode:
-                case "margin_absolute":
-                    v.margin = s.integer(3, 50)
-                case "margin_relative":
-                    v.margin = s.log_uniform(1e-2, 1e2)
+        if v.mode == "supcon":
+            v.margin_mode = s.random(["margin_absolute", "margin_relative"])
+            with s.branch(v.margin_mode):  # type: ignore
+                match v.margin_mode:
+                    case "margin_absolute":
+                        v.margin = s.integer(3, 50)
+                    case "margin_relative":
+                        v.margin = s.log_uniform(1e-2, 1e2)
+        else:
+            v.margin_mode = "e2e"
+            v.margin = 0
 
-    def get_datasets(
-        self, fold: int, key: Literal["train_on", "test_on"]
-    ) -> list[np.ndarray]:
-        opts = CLI.get_instance().get_options()
-        new_cmapss = "new_cmapss" in opts
-        cmapss_data = Path(__file__).parent.parent.parent.parent / "CMAPSSData"
-        assert not new_cmapss
-        train_on = opts[key]
-        return list(get_preprocessed_data(cmapss_data, train_on, fold=fold, n_splits=5))
+    def get_train_datasets(self, ds_name: str, fold: int) -> list[np.ndarray]:
+        if self.is_training_on_new_cmapss(ds_name):
+            raise RuntimeError
+        else:
+            cmapss_data = Path(__file__).parent.parent.parent.parent / "CMAPSSData"
+            return list(
+                get_preprocessed_data(cmapss_data, ds_name, fold=fold, n_splits=5)[:4]
+            )
 
-    def get_train_datasets(
-        self,
-        fold: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        return tuple(self.get_datasets(fold, "train_on")[:4])  # type: ignore
+    @fixture()
+    def get_n_cmapss_fold_loader(self, ds_name: str) -> FoldLoader:
+        return get_n_cmapss_folds(ds_name, self.logger())
 
-    @lru_cache
+    @fixture()
+    def get_fold_count(self, ds_name: str) -> int:
+        if self.is_training_on_new_cmapss(ds_name):
+            return self.get_n_cmapss_fold_loader(ds_name).fold_count()
+        else:
+            return 5
+
     def get_train_dataloaders(
-        self, fold: int, batch_size: int
+        self, fold: int, batch_size: int, ds_name: str
     ) -> tuple[DataLoader, DataLoader]:
-        X_train, y_train, X_val, y_val = self.get_train_datasets(fold)
-        train_dataset = TensorDataset(
-            torch.FloatTensor(X_train), torch.FloatTensor(y_train)
-        )
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=True,
-        )
+        if self.is_training_on_new_cmapss(ds_name):
+            fold_loader = self.get_n_cmapss_fold_loader(ds_name)
+            return fold_loader.load_train_val(fold, batch_size)
+        else:
+            X_train, y_train, X_val, y_val = self.get_train_datasets(ds_name, fold)
+            train_dataset = TensorDataset(
+                torch.FloatTensor(X_train), torch.FloatTensor(y_train)
+            )
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                pin_memory=True,
+            )
 
-        val_dataset = TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val))
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True,
-        )
-        return train_loader, val_loader
+            val_dataset = TensorDataset(
+                torch.FloatTensor(X_val), torch.FloatTensor(y_val)
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                pin_memory=True,
+            )
+            return train_loader, val_loader
 
-    @lru_cache
+    @fixture()
+    def is_training_on_new_cmapss(self, ds_name: str) -> bool:
+        return not ds_name.startswith("FD")
+
+    @fixture()
+    def get_sensor_type_count(self, ds_name: str) -> int:
+        if self.is_training_on_new_cmapss(ds_name):
+            return N_TYPES_NEW_CMAPSS
+        return N_TYPES_CMAPSS
+
+    @fixture()
+    def get_sensor_type_indices_list(self, ds_name: str) -> list[int]:
+        if self.is_training_on_new_cmapss(ds_name):
+            return TYPE_IDX_LIST_NEW_CMAPSS
+        return TYPE_IDX_LIST_CMAPSS
+
+    @fixture()
+    def get_sensor_count(self, ds_name: str) -> int:
+        if self.is_training_on_new_cmapss(ds_name):
+            return len(COLUMNS_TYPES)
+        X_train, *_ = self.get_train_datasets(ds_name, 0)
+        return X_train.shape[2]
+
+    @fixture()
     def device(self):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -265,19 +322,40 @@ class TrainModelExperiment(Experiment):
         return self.start_training
 
     def version(self) -> str:
-        return version_from_git_commit_hash(type(self))
+        try:
+            return version_from_git_commit_hash(type(self))
+        except Exception:
+            return version_from_most_recent_mtime(type(self))
 
     @step_method()
     def start_training(self, trial: Trial) -> NoReturn:
-        trial.add_tags([trial.v.arch, trial.v.margin_mode])
+        trial.add_tags(
+            [trial.v.arch, trial.v.margin_mode, trial.v.ds_name, trial.v.mode]
+        )
+        if trial.v.mode != "e2e":
+            trial.add_tag("not_e2e")
+        self.logger().info(
+            "starting experiment with %s",
+            json.dumps({k: v for k, v in trial.v._variables_dict.items()}),
+        )
+        env = Environment.get_environment()
+        fs = env.get_file_store_path()
+        fs_zip = fs.parent / "zip"
+        if not env.is_laptop() and len(list(fs.iterdir())) >= 90:
+            zf = fs_zip / f"{trial.uuid}.zip"
+            cmd = ["zip", "-r", str(zf.absolute()), fs]
+            ret = subprocess.call(cmd)
+            self.logger().info("ran command %s: %s", repr(cmd), str(ret))
+            if ret == 0:
+                shutil.rmtree(fs)
+                fs.mkdir()
         self.exit_next_step(self.train_fold, fold=0)
 
     @step_method()
     def train_fold(self, trial: Trial, fold: int) -> NoReturn:
-        X_train, *_ = self.get_train_datasets(fold)
         model = build_model(
-            n_sensors=X_train.shape[2],
-            n_types=N_TYPES,
+            n_sensors=self.get_sensor_count(trial.v.ds_name),
+            n_types=self.get_sensor_type_count(trial.v.ds_name),
             window_size=50,
             model_type=trial.v.arch,
             d=trial.v.dim,
@@ -290,18 +368,13 @@ class TrainModelExperiment(Experiment):
             lstm_layers=trial.v.layers,
             cnn_layers=trial.v.layers,
         ).to(self.device())
-        del X_train
-        train_dl, val_dl = self.get_train_dataloaders(fold, trial.v.batch_size)
 
         self.exit_next_step(
             self.train_one_epoch,
             last=model,
             fold=fold,
             epoch=0,
-            best=None,
             best_loss=float("inf"),
-            train_loader=train_dl,
-            val_loader=val_dl,
             patience=trial.v.patience,
             optimizer=AdamW(model.parameters(), lr=trial.v.lr),
         )
@@ -314,13 +387,17 @@ class TrainModelExperiment(Experiment):
         last: ModelType,
         best_loss: Annotated[float, STATE_ARG_RECORD],
         epoch: Annotated[int, STATE_ARG_RECORD],
-        train_loader: DataLoader,
-        val_loader: DataLoader,
         optimizer: Optimizer,
         patience: int,
     ) -> NoReturn:
-        best_path = f"/mnt/sghdd/adbiasminfilestore/{trial.uuid}.pth"
-        type_idx = torch.tensor(TYPE_IDX_LIST).to(self.device())
+        fs = Environment.get_environment().get_file_store_path()
+        best_path = fs / f"{trial.uuid}.pth"
+        type_idx = torch.tensor(self.get_sensor_type_indices_list(trial.v.ds_name)).to(
+            self.device()
+        )
+        train_loader, val_loader = self.get_train_dataloaders(
+            fold, trial.v.batch_size, trial.v.ds_name
+        )
         scaler = GradScaler("cuda")
         last.train()
         train_loss = 0
@@ -329,19 +406,23 @@ class TrainModelExperiment(Experiment):
                 batch_x.to(self.device(), non_blocking=True),
                 batch_y.to(self.device(), non_blocking=True),
             )
-
-            # Augmented views
-            x1 = augment_batch(batch_x, trial)
-            x2 = augment_batch(batch_x, trial)
-
             optimizer.zero_grad()
+            if trial.v.mode == "supcon":
+                x1 = augment_batch(batch_x, trial)
+                x2 = augment_batch(batch_x, trial)
 
-            with autocast("cuda"):
-                z1 = last.forward_contrastive(x1, type_idx)
-                z2 = last.forward_contrastive(x2, type_idx)
-                z = torch.cat([z1, z2], dim=0)
-                y = torch.cat([batch_y, batch_y], dim=0)
-                loss = supcon_loss(z, y, trial.v.margin, trial.v.margin_mode)
+                with autocast("cuda"):
+                    z1 = last.forward_contrastive(x1, type_idx)
+                    z2 = last.forward_contrastive(x2, type_idx)
+                    z = torch.cat([z1, z2], dim=0)
+                    y = torch.cat([batch_y, batch_y], dim=0)
+                    loss = supcon_loss(z, y, trial.v.margin, trial.v.margin_mode)
+            elif trial.v.mode == "e2e":
+                with autocast("cuda"):
+                    y_pred = last(batch_x, type_idx)
+                    loss = torch.nn.functional.mse_loss(y_pred, batch_y)
+            else:
+                raise RuntimeError
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -385,11 +466,7 @@ class TrainModelExperiment(Experiment):
 
         if epoch >= trial.v.epochs - 1 or patience <= 0:
             self.exit_next_step(
-                self.score_model_on_fold,
-                fold=fold,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                model=torch.load(best_path, weights_only=False),
+                self.score_model_on_fold, fold=fold, model_path=best_path
             )
         else:
             epoch += 1
@@ -399,26 +476,25 @@ class TrainModelExperiment(Experiment):
     def score_model_on_fold(
         self,
         trial: Trial,
-        model: Annotated[ModelType, STATE_ARG_RECORD],
+        model_path: Annotated[Path, STATE_ARG_RECORD],
         fold: int,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
     ) -> NoReturn:
-        type_idx = torch.tensor(TYPE_IDX_LIST).to(self.device())
+        model = torch.load(model_path, weights_only=False)
+        type_idx = torch.tensor(self.get_sensor_type_indices_list(trial.v.ds_name)).to(
+            self.device()
+        )
+        train_loader, val_loader = self.get_train_dataloaders(
+            fold, trial.v.batch_size, trial.v.ds_name
+        )
         score = evaluate_dt_performance(
             model, train_loader, val_loader, type_idx, self.device()
         )
         trial.append_trace("dt_score", score, fold=fold)
         self.logger().info("fold=%s score=%.3f", fold, score)
-        if fold in [0, 1, 2, 3]:
+        if fold < self.get_fold_count(trial.v.ds_name) - 1:
             self.exit_next_step(self.train_fold, fold=fold + 1)
         else:
             fold_scores = list(trial.trace_values("dt_score"))
-            if len(fold_scores) != 5:
-                self.logger().warning(
-                    "Somehow less than 5 folds registered?",
-                    list(trial.trace_all("dt_score")),
-                )
             mean = sum(fold_scores) / len(fold_scores)
             self.logger().info(
                 "%i folds, mean=%.3f, std=%.3f",

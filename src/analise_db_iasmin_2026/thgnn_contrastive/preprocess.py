@@ -11,7 +11,7 @@ ALL_SENSORS = list(range(1, 22))
 # Operating settings
 OPERATING_SETTINGS = ["os1", "os2", "os3"]
 
-# Sensor type mapping (0: Temp, 1: Press, 2: Speed, 3: Engine Params, 4: Coolant, 5: OpSettings)
+# Sensor type mapping (0: Temp, 1: Press, 2: Speed, 3: Engine Params, 4: Coolant, 5, 6, 7: OpSettings)
 _SENSOR_TYPES_RAW = {
     1: 0,
     2: 0,
@@ -35,8 +35,8 @@ _SENSOR_TYPES_RAW = {
     21: 3,
     16: 4,
     "os1": 5,
-    "os2": 5,
-    "os3": 5,
+    "os2": 6,
+    "os3": 7,
 }
 
 # Feature list: Operating Settings + Sensors

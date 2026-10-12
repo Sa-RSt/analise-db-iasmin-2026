@@ -6,12 +6,18 @@ readme = "README.md"
 authors = [{ name = "Sa-RSt", email = "sasha.rodelasteidle@gmail.com" }]
 requires-python = ">=3.14"
 dependencies = [
+    "cryptography>=50.0.2",
+    "fastapi>=0.142.2",
     "pandas>=3.0.6",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
     "rungrid",
     "scikit-learn>=1.9.1",
     "scikit-survival>=0.28.0",
+    "tenacity>=9.1.4",
     "torch",
     "torchvision",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -30,3 +36,8 @@ rungrid = { path = "../rungrid", editable = true }
 name = "pytorch-cuda"
 url = "https://download.pytorch.org/whl/cu132"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+]
