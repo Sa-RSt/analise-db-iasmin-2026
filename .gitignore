@@ -11,4 +11,6 @@ __pycache__
 temporal_and_heterogenous.*
 .env
 payload.zip
+models/
+rungrid-src/
 

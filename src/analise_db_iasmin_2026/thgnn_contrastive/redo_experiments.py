@@ -8,7 +8,7 @@ from rungrid.experiment import Experiment, Sampler, VarNamespace
 from analise_db_iasmin_2026.options import get_options, pop_options, push_options
 
 
-class RedoExperimentsOct2026:
+class RedoExperimentsOct2026Select:
     def __init__(self, study: optuna.Study, exp: Experiment) -> None:
         self._study = study
         datasets = ["FD001", "FD002", "FD003", "FD004"]
@@ -138,3 +138,109 @@ class RedoExperimentsOct2026:
 
     def __call__(self, v: VarNamespace, s: Sampler) -> None:
         next(self._iter)(v, s)
+
+
+class RedoExperimentsOct2026Selected:
+    def __init__(self, study: optuna.Study, exp: Experiment) -> None:
+        self._study = study
+        self._exp = exp
+        self._kinds = [
+            self.fd001_best_thgnn_supcon_lr_margin(0.008543046441516457, 16),
+            self.fd001_best_thgnn_supcon_lr_margin(5e-4, 20),
+            self.fd002_best_thgnn_supcon_lr(0.005162067891140875),
+            self.fd002_best_thgnn_supcon_lr(5e-4),
+            self.fd003_best_thgnn_supcon_lr(0.0105816834169473),
+            self.fd003_best_thgnn_supcon_lr(5e-4),
+            self.fd004_best_thgnn_supcon_lr(0.005670064419893825),
+            self.fd004_best_thgnn_supcon_lr(5e-4),
+        ]
+
+    def fd001_best_thgnn_supcon_lr_margin(
+        self, lr, margin
+    ) -> Callable[[VarNamespace, Sampler]]:
+        def curry(v: VarNamespace, s: Sampler):
+            v.folding = "no"
+            v.mode = "supcon"
+            v.arch = "thgnn"
+            v.dim = 16
+            v.hdim = 4
+            v.n_type_emb = 16
+            v.lr = lr
+            v.batch_size = 128
+            v.patience = 10
+            v.epochs = int(get_options().get("epochs", "") or 50)
+            v.aug_jitter = 0.02
+            v.aug_scaling = 0.1
+            v.layers = 0
+            v.kernel_size = 0
+            v.margin_mode = "margin_absolute"
+            v.margin = margin
+            v.ds_name = "FD001"
+
+        return curry
+
+    def fd002_best_thgnn_supcon_lr(self, lr) -> Callable[[VarNamespace, Sampler]]:
+        def curry(v: VarNamespace, s: Sampler):
+            v.folding = "no"
+            v.mode = "supcon"
+            v.arch = "thgnn"
+            v.dim = 8
+            v.hdim = 4
+            v.n_type_emb = 8
+            v.lr = lr
+            v.batch_size = 128
+            v.patience = 10
+            v.epochs = int(get_options().get("epochs", "") or 50)
+            v.aug_jitter = 0.02
+            v.aug_scaling = 0.1
+            v.layers = 0
+            v.kernel_size = 0
+            v.margin_mode = "margin_absolute"
+            v.margin = 27
+            v.ds_name = "FD002"
+
+        return curry
+
+    def fd003_best_thgnn_supcon_lr(self, lr) -> Callable[[VarNamespace, Sampler]]:
+        def curry(v: VarNamespace, s: Sampler):
+            v.folding = "no"
+            v.mode = "supcon"
+            v.arch = "thgnn"
+            v.dim = 16
+            v.hdim = 8
+            v.n_type_emb = 4
+            v.lr = lr
+            v.batch_size = 128
+            v.patience = 10
+            v.epochs = int(get_options().get("epochs", "") or 50)
+            v.aug_jitter = 0.02
+            v.aug_scaling = 0.1
+            v.layers = 0
+            v.kernel_size = 0
+            v.margin_mode = "margin_absolute"
+            v.margin = 13
+            v.ds_name = "FD003"
+
+        return curry
+
+    def fd004_best_thgnn_supcon_lr(self, lr) -> Callable[[VarNamespace, Sampler]]:
+        def curry(v: VarNamespace, s: Sampler):
+            v.folding = "no"
+            v.mode = "supcon"
+            v.arch = "thgnn"
+            v.dim = 32
+            v.hdim = 4
+            v.n_type_emb = 16
+            v.lr = lr
+            v.batch_size = 128
+            v.patience = 10
+            v.epochs = int(get_options().get("epochs", "") or 50)
+            v.aug_jitter = 0.02
+            v.aug_scaling = 0.1
+            v.layers = 0
+            v.kernel_size = 0
+            v.margin_mode = "margin_absolute"
+            v.margin = 10
+            v.ds_name = "FD004"
+
+        return curry

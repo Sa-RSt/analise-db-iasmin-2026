@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import json
 import logging
 import shutil
@@ -55,6 +56,28 @@ N_TYPES_NEW_CMAPSS = len(set(TYPE_IDX_LIST_NEW_CMAPSS))
 type ModelType = THGNN | Baseline1DCNN | BaselineGRU | BaselineLSTM
 
 
+def evaluate_e2e_performance(model, val_loader, type_idx, device):
+    model.eval()
+    y_val = []
+    y_pred = []
+
+    type_idx = type_idx.to(device)
+
+    with torch.no_grad():
+        for batch_x, batch_y in val_loader:
+            batch_x = batch_x.to(device)
+            y_val.append(batch_y.cpu().numpy())
+            y_pred.append(model(batch_x, type_idx).cpu().numpy())
+
+    y_val = np.concatenate(y_val, axis=0)
+    y_pred = np.concatenate(y_pred, axis=0)
+
+    s = calculate_score(y_val, y_pred)
+    if np.isnan(s) or np.isinf(s):
+        return float("inf")
+    return s
+
+
 def evaluate_dt_performance(model, train_loader, val_loader, type_idx, device):
     model.eval()
     X_train = []
@@ -89,10 +112,10 @@ def evaluate_dt_performance(model, train_loader, val_loader, type_idx, device):
     # Predict on validation set
     y_pred = dt.predict(X_val)
 
-    rmse = calculate_score(y_val, y_pred)
-    if np.isnan(rmse) or np.isinf(rmse):
+    s = calculate_score(y_val, y_pred)
+    if np.isnan(s) or np.isinf(s):
         return float("inf")
-    return rmse
+    return s
 
 
 def augment_batch(x, trial: Trial):
@@ -193,54 +216,59 @@ class TrainModelExperiment(Experiment):
         mode = opts["mode"].lower()
         assert mode in ["e2e", "supcon"]
 
-        v.arch = arch
-        v.mode = mode
-        v.dim = s.power_of_two(3, 5)
-        v.lr = s.log_uniform(1e-5, 1e-1)
-        v.batch_size = 50 if mode == "e2e" else 128
-        v.patience = 10
-        v.epochs = int(opts.get("epochs", "") or 50)
-        v.aug_jitter = 0.02
-        v.aug_scaling = 0.1
-        if opts["train_on"] == "olden":
-            v.ds_name = s.random(["FD001", "FD002", "FD003", "FD004"])
-        else:
-            v.ds_name = opts["train_on"]
+        folding = opts.get("folds", "yes").lower()
+        assert folding in ["yes", "no"]
 
-        with s.branch(arch):
-            match arch:
-                case "thgnn":
-                    v.hdim = s.power_of_two(1, 7)
-                    v.n_type_emb = s.power_of_two(2, 4)
-                    v.layers = 0
-                    v.kernel_size = 0
-                case "gru":
-                    v.hdim = s.power_of_two(5, 7)
-                    v.layers = s.integer(1, 3)
-                    v.kernel_size = 0
-                    v.n_type_emb = 0
-                case "lstm":
-                    v.hdim = s.power_of_two(5, 7)
-                    v.layers = s.integer(1, 3)
-                    v.kernel_size = 0
-                    v.n_type_emb = 0
-                case "cnn":
-                    v.kernel_size = s.categorical([3, 5, 7])
-                    v.layers = s.integer(1, 4)
-                    v.n_type_emb = 0
-                    v.hdim = 0
+        with s.branch(mode):
+            v.arch = arch
+            v.mode = mode
+            v.folding = folding
+            v.dim = s.power_of_two(3, 5)
+            v.lr = s.log_uniform(1e-5, 1e-1)
+            v.batch_size = 50 if mode == "e2e" else 128
+            v.patience = 10
+            v.epochs = int(opts.get("epochs", "") or 50)
+            v.aug_jitter = 0.02
+            v.aug_scaling = 0.1
+            if opts["train_on"] == "olden":
+                v.ds_name = s.random(["FD001", "FD002", "FD003", "FD004"])
+            else:
+                v.ds_name = opts["train_on"]
 
-        if v.mode == "supcon":
-            v.margin_mode = s.random(["margin_absolute", "margin_relative"])
-            with s.branch(v.margin_mode):  # type: ignore
-                match v.margin_mode:
-                    case "margin_absolute":
-                        v.margin = s.integer(3, 50)
-                    case "margin_relative":
-                        v.margin = s.log_uniform(1e-2, 1e2)
-        else:
-            v.margin_mode = "e2e"
-            v.margin = 0
+            with s.branch(arch):
+                match arch:
+                    case "thgnn":
+                        v.hdim = s.power_of_two(1, 7)
+                        v.n_type_emb = s.power_of_two(2, 4)
+                        v.layers = 0
+                        v.kernel_size = 0
+                    case "gru":
+                        v.hdim = s.power_of_two(5, 7)
+                        v.layers = s.integer(1, 3)
+                        v.kernel_size = 0
+                        v.n_type_emb = 0
+                    case "lstm":
+                        v.hdim = s.power_of_two(5, 7)
+                        v.layers = s.integer(1, 3)
+                        v.kernel_size = 0
+                        v.n_type_emb = 0
+                    case "cnn":
+                        v.kernel_size = s.categorical([3, 5, 7])
+                        v.layers = s.integer(1, 4)
+                        v.n_type_emb = 0
+                        v.hdim = 0
+
+            if v.mode == "supcon":
+                v.margin_mode = s.random(["margin_absolute", "margin_relative"])
+                with s.branch(v.margin_mode):  # type: ignore
+                    match v.margin_mode:
+                        case "margin_absolute":
+                            v.margin = s.integer(3, 50)
+                        case "margin_relative":
+                            v.margin = s.log_uniform(1e-2, 1e2)
+            else:
+                v.margin_mode = "e2e"
+                v.margin = 0
 
     def get_train_datasets(self, ds_name: str, fold: int) -> list[np.ndarray]:
         if self.is_training_on_new_cmapss(ds_name):
@@ -379,6 +407,31 @@ class TrainModelExperiment(Experiment):
             optimizer=AdamW(model.parameters(), lr=trial.v.lr),
         )
 
+    @contextmanager
+    def null_context(self):
+        yield
+
+    def calc_loss(
+        self, trial: Trial, last: ModelType, batch_x, batch_y, type_idx, ctx_factory
+    ) -> torch.Tensor:
+        if trial.v.mode == "supcon":
+            x1 = augment_batch(batch_x, trial)
+            x2 = augment_batch(batch_x, trial)
+
+            with ctx_factory():
+                z1 = last.forward_contrastive(x1, type_idx)
+                z2 = last.forward_contrastive(x2, type_idx)
+                z = torch.cat([z1, z2], dim=0)
+                y = torch.cat([batch_y, batch_y], dim=0)
+                loss = supcon_loss(z, y, trial.v.margin, trial.v.margin_mode)
+        elif trial.v.mode == "e2e":
+            with ctx_factory():
+                y_pred = last(batch_x, type_idx)
+                loss = torch.nn.functional.mse_loss(y_pred, batch_y)
+        else:
+            raise RuntimeError
+        return loss
+
     @step_method()
     def train_one_epoch(
         self,
@@ -407,22 +460,9 @@ class TrainModelExperiment(Experiment):
                 batch_y.to(self.device(), non_blocking=True),
             )
             optimizer.zero_grad()
-            if trial.v.mode == "supcon":
-                x1 = augment_batch(batch_x, trial)
-                x2 = augment_batch(batch_x, trial)
-
-                with autocast("cuda"):
-                    z1 = last.forward_contrastive(x1, type_idx)
-                    z2 = last.forward_contrastive(x2, type_idx)
-                    z = torch.cat([z1, z2], dim=0)
-                    y = torch.cat([batch_y, batch_y], dim=0)
-                    loss = supcon_loss(z, y, trial.v.margin, trial.v.margin_mode)
-            elif trial.v.mode == "e2e":
-                with autocast("cuda"):
-                    y_pred = last(batch_x, type_idx)
-                    loss = torch.nn.functional.mse_loss(y_pred, batch_y)
-            else:
-                raise RuntimeError
+            loss = self.calc_loss(
+                trial, last, batch_x, batch_y, type_idx, lambda: autocast("cuda")
+            )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -439,13 +479,9 @@ class TrainModelExperiment(Experiment):
                     batch_y.to(self.device(), non_blocking=True),
                 )
 
-                x1 = augment_batch(batch_x, trial)
-                x2 = augment_batch(batch_x, trial)
-                z1 = last.forward_contrastive(x1, type_idx)
-                z2 = last.forward_contrastive(x2, type_idx)
-                z = torch.cat([z1, z2], dim=0)
-                y = torch.cat([batch_y, batch_y], dim=0)
-                loss = supcon_loss(z, y, trial.v.margin, trial.v.margin_mode)
+                loss = self.calc_loss(
+                    trial, last, batch_x, batch_y, type_idx, self.null_context
+                )
                 val_loss += loss.item()
 
         trial.append_trace("val_loss", float(val_loss), fold=fold, epoch=epoch)
@@ -472,6 +508,18 @@ class TrainModelExperiment(Experiment):
             epoch += 1
             self.exit_next_step(self.train_one_epoch, fill_locals=True)
 
+    def evaluate_performance(
+        self, trial: Trial, model: ModelType, train_loader, val_loader, type_idx, device
+    ):
+        if trial.v.mode == "supcon":
+            return evaluate_dt_performance(
+                model, train_loader, val_loader, type_idx, device
+            )
+        elif trial.v.mode == "e2e":
+            return evaluate_e2e_performance(model, val_loader, type_idx, device)
+        else:
+            raise RuntimeError
+
     @step_method()
     def score_model_on_fold(
         self,
@@ -486,12 +534,17 @@ class TrainModelExperiment(Experiment):
         train_loader, val_loader = self.get_train_dataloaders(
             fold, trial.v.batch_size, trial.v.ds_name
         )
-        score = evaluate_dt_performance(
-            model, train_loader, val_loader, type_idx, self.device()
+        score = self.evaluate_performance(
+            trial,
+            model,
+            train_loader,
+            val_loader,
+            type_idx,
+            self.device(),
         )
         trial.append_trace("dt_score", score, fold=fold)
         self.logger().info("fold=%s score=%.3f", fold, score)
-        if fold < self.get_fold_count(trial.v.ds_name) - 1:
+        if trial.v.folding == "yes" and fold < self.get_fold_count(trial.v.ds_name) - 1:
             self.exit_next_step(self.train_fold, fold=fold + 1)
         else:
             fold_scores = list(trial.trace_values("dt_score"))
@@ -500,6 +553,6 @@ class TrainModelExperiment(Experiment):
                 "%i folds, mean=%.3f, std=%.3f",
                 len(fold_scores),
                 mean,
-                float(np.std(fold_scores)),
+                float(np.std(fold_scores) if len(fold_scores) > 1 else 0),
             )
             self.exit_done(mean)

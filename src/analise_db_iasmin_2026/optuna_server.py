@@ -143,4 +143,4 @@ class TrialServer:
         return Response(status_code=400)
 
     def serve(self) -> None:
-        uvicorn.run(self._fastapi)
+        uvicorn.run(self._fastapi, host="0.0.0.0", port=8000)

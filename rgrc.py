@@ -4,7 +4,7 @@ from pathlib import Path
 import optuna.storages.journal
 from rungrid.cli import CLI
 from rungrid.optimize import OptimizingSampler
-from rungrid.plumbing import CopyingMultiSink
+from rungrid.plumbing import CopyingMultiSink, MultiSource
 from rungrid.plumbing.storage import BucketFileStorage, CSVSink
 
 from analise_db_iasmin_2026.environment import Environment
@@ -17,14 +17,22 @@ from analise_db_iasmin_2026.thgnn_contrastive.redo_experiments import (
     RedoExperimentsOct2026,
 )
 
+
+def make_filestore(path):
+    path = Path(path)
+    return BucketFileStorage(path / ".rg-finished", path / ".rg-unfinished")
+
+
 push_options(CLI.get_instance().get_options())
 env = Environment.get_environment()
 here = Path(__file__).parent
 file_store_base = env.get_file_store_path()
-file_store = BucketFileStorage(
-    file_store_base / ".rg-finished", file_store_base / ".rg-unfinished"
-)
+file_store = make_filestore(file_store_base)
 trial_client = TrialClient(get_options().get("trial-client-url", ""))
+
+
+file_store_colab = make_filestore("/mnt/sghdd/filestore_colab/")
+file_store_kaggle = make_filestore("/mnt/sghdd/results-kaggle-9/filestore/")
 
 
 def study_factory(name: str) -> optuna.Study:

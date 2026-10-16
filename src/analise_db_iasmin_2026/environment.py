@@ -54,7 +54,7 @@ class TupleEnvironment(Environment):
         if self.is_laptop():
             return Path("/mnt/sghdd/adbiasminfilestore/")
         elif self.is_colab():
-            return Path("/content/drive/MyDrive/filestore")
+            return Path("/content/drive/MyDrive/filestore_colab")
         elif self.is_kaggle():
             return Path("/kaggle/working/filestore")
         else:

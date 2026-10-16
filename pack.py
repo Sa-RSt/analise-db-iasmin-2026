@@ -26,7 +26,7 @@ files = (
     + [
         x
         for x in (here.parent / "rungrid").iterdir()
-        if x.name != ".venv" and x.name != ".git"
+        if x.name != ".venv" and x.name != ".git" and "cache" not in x.name
     ]
 )
 
