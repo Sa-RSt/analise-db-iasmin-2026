@@ -19,6 +19,7 @@ dependencies = [
     "torch",
     "torchvision",
     "uvicorn>=0.54.0",
+    "xgboost>=3.4.1",
 ]
 
 [project.scripts]

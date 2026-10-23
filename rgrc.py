@@ -1,20 +1,23 @@
-import sys
 from pathlib import Path
 
 import optuna.storages.journal
 from rungrid.cli import CLI
+from rungrid.experiment import Experiment
 from rungrid.optimize import OptimizingSampler
-from rungrid.plumbing import CopyingMultiSink, MultiSource
+from rungrid.plumbing import CopyingMultiSink
 from rungrid.plumbing.storage import BucketFileStorage, CSVSink
 
 from analise_db_iasmin_2026.environment import Environment
 from analise_db_iasmin_2026.options import get_options, push_options
 from analise_db_iasmin_2026.optuna_server import TrialClient, TrialServer
+from analise_db_iasmin_2026.thgnn_contrastive.exp_test_model import (
+    TestModelExperiment,
+)
 from analise_db_iasmin_2026.thgnn_contrastive.exp_train_model import (
     TrainModelExperiment,
 )
 from analise_db_iasmin_2026.thgnn_contrastive.redo_experiments import (
-    RedoExperimentsOct2026,
+    RedoExperimentsOct2026Test,
 )
 
 
@@ -30,9 +33,7 @@ file_store_base = env.get_file_store_path()
 file_store = make_filestore(file_store_base)
 trial_client = TrialClient(get_options().get("trial-client-url", ""))
 
-
 file_store_colab = make_filestore("/mnt/sghdd/filestore_colab/")
-file_store_kaggle = make_filestore("/mnt/sghdd/results-kaggle-9/filestore/")
 
 
 def study_factory(name: str) -> optuna.Study:
@@ -48,23 +49,16 @@ def study_factory(name: str) -> optuna.Study:
 
 
 def run_trial_server():
-    print("REDOING THE EXPERIMENTS!", file=sys.stderr)
-    exp = TrainModelExperiment.get_instance()
+    exp: Experiment = TestModelExperiment.get_instance()
     study = study_factory(exp.identifier + "-server")
-    redo = RedoExperimentsOct2026(study, exp)
-    optimizer = OptimizingSampler(exp, study, redo)
+    # redo = RedoExperimentsOct2026Test(study, exp)
+    optimizer = OptimizingSampler(exp, study)
     file_no = 0
     file_name = Path("/")
     while file_name.exists():
         file_no += 1
-        file_name = Path(f"report-{file_no}.csv")
+        file_name = Path(f"report-{file_no}-test.csv")
     with file_name.open("w") as f:
         sink = CopyingMultiSink([optimizer, CSVSink(f)])
         ts = TrialServer(optimizer, sink)
         ts.serve()
-
-
-tme = TrainModelExperiment.get_instance()
-redo_study = study_factory(tme.identifier + "-redo")
-redo = RedoExperimentsOct2026(redo_study, tme)
-redo_optimizer = OptimizingSampler(tme, redo_study, redo)

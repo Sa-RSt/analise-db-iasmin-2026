@@ -1,11 +1,10 @@
-from contextlib import contextmanager
 import json
 import logging
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
-from functools import lru_cache
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
 
@@ -211,32 +210,41 @@ class TrainModelExperiment(Experiment):
     def variables(self, v: VarNamespace, s: Sampler) -> None:
         opts = get_options()
         arch = opts["arch"].lower()
-        assert arch in ["thgnn", "gru", "lstm", "cnn"]
+        archs = ["thgnn", "gru", "lstm", "cnn"]
+        if arch == "random":
+            arch = s.random(archs)
+        v.arch = arch
+        assert v.arch in archs
 
         mode = opts["mode"].lower()
-        assert mode in ["e2e", "supcon"]
+        modes = ["e2e", "supcon"]
+        if mode == "random":
+            mode = s.random(modes)
+        v.mode = mode
+        assert v.mode in modes
 
         folding = opts.get("folds", "yes").lower()
         assert folding in ["yes", "no"]
 
-        with s.branch(mode):
-            v.arch = arch
-            v.mode = mode
+        with s.branch(v.mode):
             v.folding = folding
             v.dim = s.power_of_two(3, 5)
             v.lr = s.log_uniform(1e-5, 1e-1)
             v.batch_size = 50 if mode == "e2e" else 128
             v.patience = 10
             v.epochs = int(opts.get("epochs", "") or 50)
-            v.aug_jitter = 0.02
-            v.aug_scaling = 0.1
+            if mode == "supcon":
+                v.aug_jitter = s.ordinal([0.0, 0.0002, 0.002, 0.02, 0.2])
+                v.aug_scaling = s.ordinal([0.0, 0.0001, 0.001, 0.01, 0.1])
+            else:
+                v.aug_scaling = v.aug_jitter = 0
             if opts["train_on"] == "olden":
                 v.ds_name = s.random(["FD001", "FD002", "FD003", "FD004"])
             else:
                 v.ds_name = opts["train_on"]
 
-            with s.branch(arch):
-                match arch:
+            with s.branch(v.arch):
+                match v.arch:
                     case "thgnn":
                         v.hdim = s.power_of_two(1, 7)
                         v.n_type_emb = s.power_of_two(2, 4)
@@ -253,17 +261,22 @@ class TrainModelExperiment(Experiment):
                         v.kernel_size = 0
                         v.n_type_emb = 0
                     case "cnn":
-                        v.kernel_size = s.categorical([3, 5, 7])
+                        v.kernel_size = s.ordinal([3, 5, 7])
                         v.layers = s.integer(1, 4)
                         v.n_type_emb = 0
                         v.hdim = 0
 
             if v.mode == "supcon":
-                v.margin_mode = s.random(["margin_absolute", "margin_relative"])
+                v.margin_mode = s.random(
+                    [
+                        "margin_absolute",
+                        # "margin_relative",
+                    ]
+                )
                 with s.branch(v.margin_mode):  # type: ignore
                     match v.margin_mode:
                         case "margin_absolute":
-                            v.margin = s.integer(3, 50)
+                            v.margin = s.integer(2, 50)
                         case "margin_relative":
                             v.margin = s.log_uniform(1e-2, 1e2)
             else:

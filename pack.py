@@ -21,6 +21,7 @@ files = (
         here / ".env",
         here / "rgrc.py",
         here / "README.md",
+        here / "models",
     ]
     + [x for x in here.iterdir() if x.suffix == ".log"]
     + [
