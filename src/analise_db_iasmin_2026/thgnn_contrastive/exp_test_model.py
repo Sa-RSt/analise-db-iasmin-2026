@@ -439,8 +439,16 @@ class TestModelExperiment(Experiment):
     @step_method()
     def start_testing(self, trial: Trial) -> NoReturn:
         trial.add_tags(
-            ["testing", trial.v.arch, trial.v.mode, trial.v.ds_name, trial.v.decap_kind]
+            [
+                "testing",
+                trial.v.arch,
+                trial.v.mode,
+                trial.v.ds_name,
+                trial.v.decap_kind,
+            ]
         )
+        if trial.v.pca:
+            trial.add_tag(f"pca{trial.v.pca}")
         self.logger().info(
             "Starting testing experiment with variables: %s",
             json.dumps({k: v for k, v in trial.v._variables_dict.items()}),

@@ -33,7 +33,7 @@ file_store_base = env.get_file_store_path()
 file_store = make_filestore(file_store_base)
 trial_client = TrialClient(get_options().get("trial-client-url", ""))
 
-file_store_colab = make_filestore("/mnt/sghdd/filestore_colab/")
+# file_store_colab = make_filestore("/mnt/sghdd/filestore_colab/")
 
 
 def study_factory(name: str) -> optuna.Study:
@@ -49,7 +49,7 @@ def study_factory(name: str) -> optuna.Study:
 
 
 def run_trial_server():
-    exp: Experiment = TestModelExperiment.get_instance()
+    exp: Experiment = TrainModelExperiment.get_instance()
     study = study_factory(exp.identifier + "-server")
     # redo = RedoExperimentsOct2026Test(study, exp)
     optimizer = OptimizingSampler(exp, study)
@@ -57,7 +57,7 @@ def run_trial_server():
     file_name = Path("/")
     while file_name.exists():
         file_no += 1
-        file_name = Path(f"report-{file_no}-test.csv")
+        file_name = Path(f"report-{file_no}-train.csv")
     with file_name.open("w") as f:
         sink = CopyingMultiSink([optimizer, CSVSink(f)])
         ts = TrialServer(optimizer, sink)

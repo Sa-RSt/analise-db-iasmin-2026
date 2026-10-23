@@ -372,7 +372,13 @@ class TrainModelExperiment(Experiment):
     @step_method()
     def start_training(self, trial: Trial) -> NoReturn:
         trial.add_tags(
-            [trial.v.arch, trial.v.margin_mode, trial.v.ds_name, trial.v.mode]
+            [
+                "training",
+                trial.v.arch,
+                trial.v.margin_mode,
+                trial.v.ds_name,
+                trial.v.mode,
+            ]
         )
         if trial.v.mode != "e2e":
             trial.add_tag("not_e2e")
