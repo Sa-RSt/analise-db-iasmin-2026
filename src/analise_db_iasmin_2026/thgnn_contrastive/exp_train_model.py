@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated, Literal, NoReturn
 
 import numpy as np
+from pandas import isna
 import torch
 from rungrid.experiment import (
     STATE_ARG_RECORD,
@@ -498,6 +499,9 @@ class TrainModelExperiment(Experiment):
                 val_loss += loss.item()
 
         trial.append_trace("val_loss", float(val_loss), fold=fold, epoch=epoch)
+
+        if not np.isfinite(float(train_loss)) or not np.isfinite(float(val_loss)):
+            self.exit_prune("failed to converge")
 
         if val_loss < best_loss:
             torch.save(last, best_path)
