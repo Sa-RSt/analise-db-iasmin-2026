@@ -210,31 +210,32 @@ class TrainModelExperiment(Experiment):
 
     def variables(self, v: VarNamespace, s: Sampler) -> None:
         opts = get_options()
-        arch = opts["arch"].lower()
+        opt_arch = opts["arch"].lower()
         archs = ["thgnn", "gru", "lstm", "cnn"]
-        if arch == "random":
-            arch = s.random(archs)
-        v.arch = arch
+        if opt_arch == "random":
+            v.arch = s.random(archs)
+        else:
+            v.arch = opt_arch
         assert v.arch in archs
 
-        mode = opts["mode"].lower()
+        opt_mode = opts["mode"].lower()
         modes = ["e2e", "supcon"]
-        if mode == "random":
-            mode = s.random(modes)
-        v.mode = mode
+        if opt_mode == "random":
+            v.mode = s.random(modes)
+        else:
+            v.mode = opt_mode
         assert v.mode in modes
 
-        folding = opts.get("folds", "yes").lower()
-        assert folding in ["yes", "no"]
+        v.folding = opts.get("folds", "yes").lower()
+        assert v.folding in ["yes", "no"]
 
         with s.branch(v.mode):
-            v.folding = folding
             v.dim = s.power_of_two(3, 5)
             v.lr = s.log_uniform(1e-5, 1e-1)
-            v.batch_size = 50 if mode == "e2e" else 128
+            v.batch_size = 50 if v.mode == "e2e" else 128
             v.patience = 10
             v.epochs = int(opts.get("epochs", "") or 50)
-            if mode == "supcon":
+            if v.mode == "supcon":
                 v.aug_jitter = s.ordinal([0.0, 0.0002, 0.002, 0.02, 0.2])
                 v.aug_scaling = s.ordinal([0.0, 0.0001, 0.001, 0.01, 0.1])
             else:
