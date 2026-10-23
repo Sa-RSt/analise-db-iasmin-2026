@@ -1,49 +1,47 @@
 import os
-import pickle
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from analise_db_iasmin_2026.thgnn_contrastive.split import get_engine_split
 
-# All 21 sensors
-ALL_SENSORS = list(range(1, 22))
+# Dropped constant/uninformative sensors: 1, 5, 6, 10, 16, 18, 19
+# Active 14 sensors
+ACTIVE_SENSORS = [2, 3, 4, 7, 8, 9, 11, 12, 13, 14, 15, 17, 20, 21]
+ALL_SENSORS = ACTIVE_SENSORS
 # Operating settings
 OPERATING_SETTINGS = ["os1", "os2", "os3"]
 
-# Sensor type mapping (0: Temp, 1: Press, 2: Speed, 3: Engine Params, 4: Coolant, 5, 6, 7: OpSettings)
+# Sensor type mapping:
+# Type 0: Operating Settings (os1, os2, os3)
+# Type 1: Temperature (s2, s3, s4)
+# Type 2: Pressure (s7, s11)
+# Type 3: Speed (s8, s9, s13, s14)
+# Type 4: Engine Params / Flow / Bleed (s12, s15, s17, s20, s21)
 _SENSOR_TYPES_RAW = {
-    1: 0,
-    2: 0,
-    3: 0,
-    4: 0,
-    5: 1,
-    6: 1,
-    7: 1,
-    10: 1,
-    11: 1,
-    8: 2,
-    9: 2,
-    13: 2,
-    14: 2,
-    18: 2,
-    19: 2,
-    12: 3,
-    15: 3,
-    17: 3,
-    20: 3,
-    21: 3,
-    16: 4,
-    "os1": 5,
-    "os2": 6,
-    "os3": 7,
+    "os1": 0,
+    "os2": 5,
+    "os3": 6,
+    2: 1,
+    3: 1,
+    4: 1,
+    7: 2,
+    11: 2,
+    8: 3,
+    9: 3,
+    13: 3,
+    14: 3,
+    12: 4,
+    15: 4,
+    17: 4,
+    20: 4,
+    21: 4,
 }
 
 # Feature list: Operating Settings + Sensors
-# Order: os1, os2, os3, s1, s2, ..., s21
-ACTIVE_FEATURES = OPERATING_SETTINGS + [f"s{i}" for i in ALL_SENSORS]
+# Order: os1, os2, os3, s2, s3, s4, s7, s8, s9, s11, s12, s13, s14, s15, s17, s20, s21
+ACTIVE_FEATURES = OPERATING_SETTINGS + [f"s{i}" for i in ACTIVE_SENSORS]
 
 # Build SENSOR_TYPES with string keys for sensors
 SENSOR_TYPES = {}
@@ -90,37 +88,25 @@ def process_targets(df, r_max=125):
 
 def normalize_data(train_df, test_df, val_df=None, kmeans=None):
     """
-    Standard (Z-score) normalization per operating condition for sensors.
-    Operating settings are normalized globally.
-    Sensors and operating settings scalers are fit strictly on train_df.
+    MinMax normalization per operating condition (grouped by os1 rounded to 1 decimal)
+    for sensors, and global StandardScaler for operating settings.
+    Scalers are fit strictly on train_df.
     """
     train_df = train_df.copy()
     test_df = test_df.copy()
     if val_df is not None:
         val_df = val_df.copy()
 
-    sensor_features = [f"s{i}" for i in ALL_SENSORS]
+    sensor_features = [f"s{i}" for i in ACTIVE_SENSORS]
     for feature in sensor_features:
         train_df[feature] = np.float64(train_df[feature])
         test_df[feature] = np.float64(test_df[feature])
         if val_df is not None:
             val_df[feature] = np.float64(val_df[feature])
 
-    # Check variance to identify single-regime datasets (e.g. FD001, FD003)
-    if train_df["os1"].var() < 1.0:
-        train_regimes = np.zeros(len(train_df), dtype=int)
-        test_regimes = np.zeros(len(test_df), dtype=int)
-        val_regimes = np.zeros(len(val_df), dtype=int) if val_df is not None else None
-    else:
-        # Multi-regime datasets (e.g. FD002, FD004)
-        assert kmeans is not None
-        train_regimes = kmeans.predict(train_df[OPERATING_SETTINGS].to_numpy())
-        test_regimes = kmeans.predict(test_df[OPERATING_SETTINGS].to_numpy())
-        val_regimes = (
-            kmeans.predict(val_df[OPERATING_SETTINGS].to_numpy())
-            if val_df is not None
-            else None
-        )
+    train_regimes = train_df["os1"].round(1)
+    test_regimes = test_df["os1"].round(1)
+    val_regimes = val_df["os1"].round(1) if val_df is not None else None
 
     # Scale sensors per regime
     for regime in np.unique(train_regimes):
@@ -129,7 +115,7 @@ def normalize_data(train_df, test_df, val_df=None, kmeans=None):
         val_mask = val_regimes == regime if val_regimes is not None else None
 
         if train_mask.any():
-            scaler = StandardScaler()
+            scaler = MinMaxScaler()
             # Fit and transform training data for this regime
             train_df.loc[train_mask, sensor_features] = scaler.fit_transform(
                 train_df.loc[train_mask, sensor_features]
@@ -152,7 +138,7 @@ def normalize_data(train_df, test_df, val_df=None, kmeans=None):
     if val_df is not None:
         val_df[OPERATING_SETTINGS] = scaler_os.transform(val_df[OPERATING_SETTINGS])
 
-    # Fill NaNs for constant features (std=0 in a regime)
+    # Fill NaNs for constant features if any
     train_df[ACTIVE_FEATURES] = train_df[ACTIVE_FEATURES].fillna(0)
     test_df[ACTIVE_FEATURES] = test_df[ACTIVE_FEATURES].fillna(0)
     if val_df is not None:
@@ -244,16 +230,7 @@ def get_preprocessed_data(
     train_df = train_df_all[train_df_all["unit"].isin(train_units)].copy()
     val_df = train_df_all[train_df_all["unit"].isin(val_units)].copy()
 
-    # Load pre-computed K-Means if available for multi-regime datasets
-    kmeans = None
-    if fold is not None and train_df["os1"].var() >= 1.0:
-        kmeans_path = os.path.join(data_path, f"kmeans_{dataset_id}_fold_{fold}.pkl")
-        with open(kmeans_path, "rb") as f:
-            kmeans = pickle.load(f)
-
-    train_df, val_df, test_df = normalize_data(
-        train_df, test_df, val_df=val_df, kmeans=kmeans
-    )
+    train_df, val_df, test_df = normalize_data(train_df, test_df, val_df=val_df)
 
     X_train, y_train = create_windows(train_df, window_size=window_size)
     X_val, y_val = create_windows(val_df, window_size=window_size)
